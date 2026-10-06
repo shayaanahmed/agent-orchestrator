@@ -1,0 +1,1 @@
+"""Restricted project validation service."""

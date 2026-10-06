@@ -1,211 +1,241 @@
-version: '3.8'
+name: agent-orchestrator
+
+x-app-environment: &app-environment
+  DATABASE_URL: postgresql://${POSTGRES_USER:-orchestrator}:${POSTGRES_PASSWORD:-orchestrator}@postgres:5432/${POSTGRES_DB:-orchestrator}
+  OLLAMA_BASE_URL: http://model-gateway:8080/v1
+  OLLAMA_API_TOKEN: ${MODEL_GATEWAY_TOKEN:-local-gateway-change-me}
+  OLLAMA_PLANNER_MODEL: ${OLLAMA_PLANNER_MODEL:-qwen3:8b}
+  OLLAMA_CODER_MODEL: ${OLLAMA_CODER_MODEL:-qwen2.5-coder:7b}
+  OLLAMA_REVIEWER_MODEL: ${OLLAMA_REVIEWER_MODEL:-qwen3:8b}
+  OLLAMA_FAST_MODEL: ${OLLAMA_FAST_MODEL:-qwen3:4b}
+  OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text}
+  OLLAMA_VISION_MODEL: ${OLLAMA_VISION_MODEL:-qwen3-vl:8b}
+  TEMPORAL_ADDRESS: temporal:7233
+  TEMPORAL_TASK_QUEUE: project-execution
+  USE_TEMPORAL: "true"
+  ARTIFACT_DIRECTORY: /data/artifacts
+  MODEL_MAX_CONCURRENCY: ${MODEL_MAX_CONCURRENCY:-2}
+  SANDBOX_URL: http://sandbox-controller:8090
+  SANDBOX_TOKEN: ${SANDBOX_TOKEN:-sandbox-change-me}
+  SANDBOX_TIMEOUT_SECONDS: ${SANDBOX_TIMEOUT_SECONDS:-120}
 
 services:
-  # Reverse proxy for Ollama (not part of this stack)
   reverse-proxy:
-    image: nginx:alpine
+    image: nginx:1.27-alpine
     ports:
-      - "443:443"
+      - "${APP_PORT:-8088}:80"
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf
-    networks:
-      - internal
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_started
+    networks: [edge, internal]
+    restart: unless-stopped
 
-  # Web UI service
   web:
     build:
       context: ../..
-      dockerfile: platform/web/Dockerfile
-    ports:
-      - "3000:3000"
-    environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
-    depends_on:
-      - api
-    networks:
-      - internal
+      dockerfile: web/Dockerfile
+    expose: ["80"]
+    networks: [internal]
+    restart: unless-stopped
 
-  # API service
   api:
     build:
       context: ../..
-      dockerfile: platform/services/api/Dockerfile  
-    ports:
-      - "8000:8000"
-    environment:
-      - DATABASE_URL=postgresql://user:password@postgres:5432/projectdb
-      - MINIO_ENDPOINT=minio:9000
-      - OLLAMA_BASE_URL=https://llm.internal.example/v1
-      - OLLAMA_API_TOKEN=<secret>
+      dockerfile: services/api/Dockerfile
+    environment: *app-environment
+    volumes:
+      - artifact_data:/data/artifacts
+    expose: ["8000"]
     depends_on:
-      - postgres
-      - minio
-    networks:
-      - internal
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+      model-gateway:
+        condition: service_healthy
+      sandbox-controller:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/system/readiness')"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks: [internal, sandbox-control]
+    restart: unless-stopped
 
-  # Temporal workflow service
-  temporal:
-    image: temporalio/auto-setup:latest
-    environment:
-      - DB=postgresql
-      - DB_PORT=5432
-      - DB_USER=user
-      - DB_PASSWORD=password
-      - DB_NAME=temporal
-      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development.yaml
-    ports:
-      - "7233:7233"
-    depends_on:
-      - postgres
-    networks:
-      - internal
-
-  # Temporal UI
-  temporal-ui:
-    image: temporalio/ui:latest
-    environment:
-      - TEMPORAL_GRPC_ENDPOINT=temporal:7233
-    ports:
-      - "8080:8080"
-    depends_on:
-      - temporal
-    networks:
-      - internal
-
-  # Orchestrator worker
   orchestrator-worker:
     build:
       context: ../..
-      dockerfile: platform/services/orchestrator_worker/Dockerfile
-    environment:
-      - DATABASE_URL=postgresql://user:password@postgres:5432/projectdb
-      - TEMPORAL_ADDRESS=temporal:7233
+      dockerfile: services/orchestrator_worker/Dockerfile
+    environment: *app-environment
+    volumes:
+      - artifact_data:/data/artifacts
     depends_on:
-      - temporal
-      - postgres
-    networks:
-      - internal
+      postgres:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+      model-gateway:
+        condition: service_healthy
+      sandbox-controller:
+        condition: service_healthy
+    networks: [internal, sandbox-control]
+    restart: unless-stopped
 
-  # Agent worker
-  agent-worker:
-    build:
-      context: ../..
-      dockerfile: platform/services/agent_worker/Dockerfile
-    environment:
-      - DATABASE_URL=postgresql://user:password@postgres:5432/projectdb
-      - TEMPORAL_ADDRESS=temporal:7233
-    depends_on:
-      - temporal
-      - postgres
-    networks:
-      - internal
-
-  # Review worker
-  review-worker:
-    build:
-      context: ../..
-      dockerfile: platform/services/review_worker/Dockerfile
-    environment:
-      - DATABASE_URL=postgresql://user:password@postgres:5432/projectdb
-      - TEMPORAL_ADDRESS=temporal:7233
-    depends_on:
-      - temporal
-      - postgres
-    networks:
-      - internal
-
-  # Model gateway
-  model-gateway:
-    build:
-      context: ../..
-      dockerfile: platform/services/model_gateway/Dockerfile
-    environment:
-      - OLLAMA_BASE_URL=https://llm.internal.example/v1
-      - OLLAMA_API_TOKEN=<secret>
-    depends_on:
-      - reverse-proxy
-    networks:
-      - internal
-
-  # Sandbox controller
   sandbox-controller:
     build:
       context: ../..
-      dockerfile: platform/services/sandbox_controller/Dockerfile
+      dockerfile: services/sandbox_controller/Dockerfile
     environment:
-      - DATABASE_URL=postgresql://user:password@postgres:5432/projectdb
-    networks:
-      - internal
+      ARTIFACT_DIRECTORY: /data/artifacts
+      SANDBOX_TOKEN: ${SANDBOX_TOKEN:-sandbox-change-me}
+      SANDBOX_MAX_OUTPUT_BYTES: ${SANDBOX_MAX_OUTPUT_BYTES:-200000}
+    volumes:
+      - artifact_data:/data/artifacts
+    expose: ["8090"]
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 1g
+    cpus: 1.5
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8090/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    networks: [sandbox-control]
+    restart: unless-stopped
 
-  # Database (PostgreSQL)
-  postgres:
-    image: postgres:15
+  model-gateway:
+    build:
+      context: ../..
+      dockerfile: services/model_gateway/Dockerfile
     environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: projectdb
+      UPSTREAM_OLLAMA_BASE_URL: ${OLLAMA_BASE_URL}
+      UPSTREAM_OLLAMA_API_TOKEN: ${OLLAMA_API_TOKEN:-ollama}
+      MODEL_GATEWAY_TOKEN: ${MODEL_GATEWAY_TOKEN:-local-gateway-change-me}
+      MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-600}
+      MODEL_CONNECT_TIMEOUT_SECONDS: ${MODEL_CONNECT_TIMEOUT_SECONDS:-10}
+    expose: ["8080"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 15s
+      timeout: 6s
+      retries: 10
+      start_period: 10s
+    networks: [internal, model-egress]
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16.4-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-orchestrator}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-orchestrator}
+      POSTGRES_DB: ${POSTGRES_DB:-orchestrator}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./migrations:/migrations
-    ports:
-      - "5432:5432"
-    networks:
-      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-orchestrator} -d ${POSTGRES_DB:-orchestrator}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [internal]
+    restart: unless-stopped
 
-  # Object storage (MinIO)
-  minio:
-    image: minio/minio:latest
-    command: server /data --console-address ":9001"
+  temporal-postgres:
+    image: postgres:16.4-alpine
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
     volumes:
-      - minio_data:/data
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    networks:
-      - internal
+      - temporal_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [internal]
+    restart: unless-stopped
 
-  # OpenTelemetry Collector
-  otel-collector:
-    image: otel/opentelemetry-collector:latest
-    command: ["--config=/etc/otel.yaml"]
-    volumes:
-      - ./otel-config.yaml:/etc/otel.yaml
+  temporal:
+    image: temporalio/auto-setup:1.29.7
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      POSTGRES_SEEDS: temporal-postgres
+      TEMPORAL_ADDRESS: temporal:7233
+    depends_on:
+      temporal-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "temporal:7233"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
     ports:
-      - "4317:4317"
-      - "4318:4318"
-    networks:
-      - internal
+      - "7233:7233"
+    networks: [internal]
+    restart: unless-stopped
 
-  # Prometheus
+  temporal-ui:
+    image: temporalio/ui:2.54.1
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:${APP_PORT:-8088}
+    depends_on:
+      temporal:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    networks: [internal]
+    restart: unless-stopped
+
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.5.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
     ports:
       - "9090:9090"
-    networks:
-      - internal
+    networks: [internal]
+    restart: unless-stopped
 
-  # Grafana
   grafana:
-    image: grafana/grafana-enterprise:latest
+    image: grafana/grafana:12.1.0
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change-me}
     volumes:
       - grafana_data:/var/lib/grafana
     ports:
-      - "3000:3000"
-    networks:
-      - internal
+      - "3001:3000"
+    networks: [internal]
+    restart: unless-stopped
 
 volumes:
   postgres_data:
-  minio_data:
+  temporal_postgres_data:
+  artifact_data:
+  prometheus_data:
   grafana_data:
 
 networks:
+  edge:
   internal:
-    driver: bridge
+    internal: true
+  model-egress:
+  sandbox-control:
+    internal: true

@@ -1,90 +1,62 @@
-"""
-Test suite for domain models of the AI project execution platform.
-"""
+import unittest
+from uuid import uuid4
 
-import pytest
-from uuid import UUID, uuid4
-from datetime import datetime
-
-from platform.core.domain.project import Project, ProjectGoal, ProjectStatus  
-from platform.core.domain.agent import AgentSpec, AgentRole, Capability
-from platform.core.domain.task import WorkItem, TaskStatus
-from platform.core.domain.artifact import Artifact, ArtifactType, ArtifactStatus
+from core.domain.agent import AgentRole, AgentSpec, Capability
+from core.domain.artifact import Artifact, ArtifactType
+from core.domain.project import Project, ProjectGoal, ProjectStatus
+from core.domain.task import TaskStatus, WorkItem
 
 
-def test_project_creation():
-    """Test that projects can be created with valid data"""
-    goal = ProjectGoal(text="Build a paper-trading application")
-    
-    project = Project(
-        id=uuid4(),
-        name="Paper Trading App",
-        description="An application for paper trading stocks",
-        goal=goal,
-        owner_id=uuid4(),
-        status=ProjectStatus.CREATED
-    )
-    
-    assert project.id is not None
-    assert project.name == "Paper Trading App"
-    assert project.goal.text == "Build a paper-trading application"
-    assert project.status == ProjectStatus.CREATED
+class DomainModelTests(unittest.TestCase):
+    def test_project_creation(self) -> None:
+        project = Project(
+            id=uuid4(),
+            name="Paper Trading App",
+            description="An application for paper trading stocks",
+            goal=ProjectGoal(text="Build a paper-trading application"),
+            owner_id=uuid4(),
+        )
+        self.assertEqual(project.status, ProjectStatus.CREATED)
+        self.assertEqual(project.requirements, [])
 
+    def test_agent_spec_creation(self) -> None:
+        agent = AgentSpec(
+            id=uuid4(),
+            role=AgentRole.CODER,
+            objective="Implement project deliverables",
+            capabilities=[Capability.CODE_GENERATION],
+            instructions="Produce complete code",
+            model_class="coder",
+        )
+        self.assertEqual(agent.role, AgentRole.CODER)
+        self.assertIn(Capability.CODE_GENERATION, agent.capabilities)
 
-def test_agent_spec_creation():
-    """Test that agent specifications can be created"""
-    agent = AgentSpec(
-        id=uuid4(),
-        role=AgentRole.PLANNER,
-        objective="Plan AI projects",
-        capabilities=[Capability.CODE_GENERATION, Capability.RESEARCH],
-        instructions="Create structured plans for projects",
-        model_class="planner",
-        max_iterations=5,
-        max_model_calls=20
-    )
-    
-    assert agent.id is not None
-    assert agent.role == AgentRole.PLANNER
-    assert len(agent.capabilities) == 2
+    def test_work_item_uses_independent_default_lists(self) -> None:
+        first = WorkItem(
+            id=uuid4(), project_id=uuid4(), name="One", description="First task"
+        )
+        second = WorkItem(
+            id=uuid4(), project_id=uuid4(), name="Two", description="Second task"
+        )
+        first.dependencies.append(uuid4())
+        self.assertEqual(second.dependencies, [])
+        self.assertEqual(first.status, TaskStatus.PENDING)
 
-
-def test_work_item_creation():
-    """Test that work items can be created"""
-    work_item = WorkItem(
-        id=uuid4(),
-        project_id=uuid4(),
-        name="Create requirements document",
-        description="Document the functional requirements",
-        status=TaskStatus.PENDING
-    )
-    
-    assert work_item.id is not None
-    assert work_item.name == "Create requirements document"
-    assert work_item.status == TaskStatus.PENDING
-
-
-def test_artifact_creation():
-    """Test that artifacts can be created"""
-    artifact = Artifact(
-        id=uuid4(),
-        project_id=uuid4(),
-        work_item_id=uuid4(),
-        producer_agent_id=uuid4(),
-        name="Requirements Document",
-        type=ArtifactType.DOCUMENTATION,
-        mime_type="text/markdown",
-        size=1024,
-        content_hash="a1b2c3d4e5f6", 
-        storage_reference="project1/requirements.md",
-        status=ArtifactStatus.DRAFT
-    )
-    
-    assert artifact.id is not None
-    assert artifact.name == "Requirements Document"
-    assert artifact.type == ArtifactType.DOCUMENTATION
-    assert artifact.size == 1024
+    def test_artifact_creation(self) -> None:
+        artifact = Artifact(
+            id=uuid4(),
+            project_id=uuid4(),
+            work_item_id=uuid4(),
+            producer_agent_id=uuid4(),
+            name="Requirements",
+            type=ArtifactType.DOCUMENTATION,
+            mime_type="text/markdown",
+            size=12,
+            content_hash="a" * 64,
+            storage_reference="project/requirements.md",
+        )
+        self.assertEqual(artifact.size, 12)
 
 
 if __name__ == "__main__":
-    pytest.main([__file__])
+    unittest.main()
