@@ -1,0 +1,211 @@
+version: '3.8'
+
+services:
+  # Reverse proxy for Ollama (not part of this stack)
+  reverse-proxy:
+    image: nginx:alpine
+    ports:
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
+    networks:
+      - internal
+
+  # Web UI service
+  web:
+    build:
+      context: ../..
+      dockerfile: platform/web/Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      - api
+    networks:
+      - internal
+
+  # API service
+  api:
+    build:
+      context: ../..
+      dockerfile: platform/services/api/Dockerfile  
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://user:password@postgres:5432/projectdb
+      - MINIO_ENDPOINT=minio:9000
+      - OLLAMA_BASE_URL=https://llm.internal.example/v1
+      - OLLAMA_API_TOKEN=<secret>
+    depends_on:
+      - postgres
+      - minio
+    networks:
+      - internal
+
+  # Temporal workflow service
+  temporal:
+    image: temporalio/auto-setup:latest
+    environment:
+      - DB=postgresql
+      - DB_PORT=5432
+      - DB_USER=user
+      - DB_PASSWORD=password
+      - DB_NAME=temporal
+      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development.yaml
+    ports:
+      - "7233:7233"
+    depends_on:
+      - postgres
+    networks:
+      - internal
+
+  # Temporal UI
+  temporal-ui:
+    image: temporalio/ui:latest
+    environment:
+      - TEMPORAL_GRPC_ENDPOINT=temporal:7233
+    ports:
+      - "8080:8080"
+    depends_on:
+      - temporal
+    networks:
+      - internal
+
+  # Orchestrator worker
+  orchestrator-worker:
+    build:
+      context: ../..
+      dockerfile: platform/services/orchestrator_worker/Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://user:password@postgres:5432/projectdb
+      - TEMPORAL_ADDRESS=temporal:7233
+    depends_on:
+      - temporal
+      - postgres
+    networks:
+      - internal
+
+  # Agent worker
+  agent-worker:
+    build:
+      context: ../..
+      dockerfile: platform/services/agent_worker/Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://user:password@postgres:5432/projectdb
+      - TEMPORAL_ADDRESS=temporal:7233
+    depends_on:
+      - temporal
+      - postgres
+    networks:
+      - internal
+
+  # Review worker
+  review-worker:
+    build:
+      context: ../..
+      dockerfile: platform/services/review_worker/Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://user:password@postgres:5432/projectdb
+      - TEMPORAL_ADDRESS=temporal:7233
+    depends_on:
+      - temporal
+      - postgres
+    networks:
+      - internal
+
+  # Model gateway
+  model-gateway:
+    build:
+      context: ../..
+      dockerfile: platform/services/model_gateway/Dockerfile
+    environment:
+      - OLLAMA_BASE_URL=https://llm.internal.example/v1
+      - OLLAMA_API_TOKEN=<secret>
+    depends_on:
+      - reverse-proxy
+    networks:
+      - internal
+
+  # Sandbox controller
+  sandbox-controller:
+    build:
+      context: ../..
+      dockerfile: platform/services/sandbox_controller/Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://user:password@postgres:5432/projectdb
+    networks:
+      - internal
+
+  # Database (PostgreSQL)
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: projectdb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/migrations
+    ports:
+      - "5432:5432"
+    networks:
+      - internal
+
+  # Object storage (MinIO)
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - internal
+
+  # OpenTelemetry Collector
+  otel-collector:
+    image: otel/opentelemetry-collector:latest
+    command: ["--config=/etc/otel.yaml"]
+    volumes:
+      - ./otel-config.yaml:/etc/otel.yaml
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    networks:
+      - internal
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    networks:
+      - internal
+
+  # Grafana
+  grafana:
+    image: grafana/grafana-enterprise:latest
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    networks:
+      - internal
+
+volumes:
+  postgres_data:
+  minio_data:
+  grafana_data:
+
+networks:
+  internal:
+    driver: bridge
